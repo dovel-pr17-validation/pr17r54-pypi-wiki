@@ -1,0 +1,391 @@
+{% from "templates/wiki/macros/sidebar_tree.html" import render_wiki_tree %}
+{% from "templates/wiki/macros/buttons.html" import render_icon %}
+
+<div class="wiki-sidebar hidden lg:flex w-72 bg-[var(--surface-base)] border-r border-[var(--outline-gray-1)] flex-col flex-shrink-0 transition-[width,border-width] duration-300 ease-in-out overflow-hidden sticky top-[var(--wiki-chrome-h)] h-[calc(100vh-var(--wiki-chrome-h))]"
+     x-data="wikiSidebar()"
+     :style="isCollapsed ? 'width: 0; border-right-width: 0;' : 'width: 18rem;'">
+
+    {% set current_route = doc.route if doc else '' %}
+
+    <nav class="px-2 py-2 flex-1 overflow-y-auto" x-ref="nav">
+        {{ render_wiki_tree(nested_tree or [], current_route=current_route, expanded_nodes=expanded_nodes or set()) }}
+    </nav>
+</div>
+
+<div x-data="{ hovered: false }"
+     class="wiki-sidebar-toggle hidden lg:flex items-center fixed z-40 top-[var(--wiki-chrome-h)] h-[calc(100vh-var(--wiki-chrome-h))] transition-[left] duration-300 ease-in-out"
+     :style="$store.sidebar.isCollapsed ? 'left: 0.5rem;' : 'left: calc(18rem - 0.25rem);'"
+     @mouseenter="hovered = true"
+     @mouseleave="hovered = false">
+    <div class="w-8 h-full flex items-center justify-center">
+        <button @click="$store.sidebar.toggle()"
+                class="inline-flex items-center justify-center p-1 transition-all duration-200 cursor-pointer focus:outline-none"
+                :class="$store.sidebar.isCollapsed ? 'opacity-100' : (hovered ? 'opacity-100 scale-100' : 'opacity-0 scale-75')">
+            <svg class="w-4 h-4 text-[var(--ink-gray-4)] hover:text-[var(--ink-gray-6)] transition-colors duration-200"
+                 :class="$store.sidebar.isCollapsed ? '' : 'rotate-180'"
+                 xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m6 17 5-5-5-5"/>
+                <path d="m13 17 5-5-5-5"/>
+            </svg>
+        </button>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        // Read the painted theme so a stored 'system' can't disagree with the page.
+        const initialIsDark =
+            document.documentElement.getAttribute('data-theme') === 'dark';
+
+        Alpine.store('theme', {
+            isDark: initialIsDark,
+            toggle() {
+                this.set(this.isDark ? 'light' : 'dark');
+            },
+            set(newTheme) {
+                this.isDark = newTheme === 'dark';
+                const root = document.documentElement;
+                // Two rAFs so no-transition outlives the swap's style and paint, else the page flashes.
+                root.classList.add('no-transition');
+                root.setAttribute('data-theme', newTheme);
+                // frappe-ui's key, so this toggle and the editor SPA agree.
+                try {
+                    localStorage.setItem('theme', newTheme);
+                } catch (e) {}
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        root.classList.remove('no-transition');
+                    });
+                });
+            }
+        });
+
+        Alpine.store('sidebar', {
+            isCollapsed: Alpine.$persist(false).as('sidebar.isCollapsed'),
+            init() {
+                // Alpine's :style takes over from the pre-paint attribute.
+                document.documentElement.removeAttribute('data-sidebar-collapsed');
+            },
+            toggle() {
+                this.isCollapsed = !this.isCollapsed;
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            const target = e.target;
+            const isInput = target.tagName === 'INPUT' ||
+                           target.tagName === 'TEXTAREA' ||
+                           target.isContentEditable;
+
+            if (!isInput && e.key.toLowerCase() === 's' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+                Alpine.store('sidebar').toggle();
+            }
+        });
+
+        Alpine.store('navigation', {
+            loading: false,
+            currentRoute: '{{ doc.route if doc else "" }}',
+            prefetchCache: {},
+            prefetchTimer: null,
+
+            init() {
+                window.addEventListener('popstate', (event) => {
+                    if (event.state?.route) {
+                        this.navigateTo(event.state.route, false);
+                    }
+                });
+                // Keep the hash for TOC anchor links.
+                history.replaceState({ route: this.currentRoute }, '', window.location.pathname + window.location.hash);
+            },
+
+            prefetch(route) {
+                clearTimeout(this.prefetchTimer);
+                this.prefetchTimer = setTimeout(() => this.fetchIntoCache(route), 100);
+            },
+
+            cancelPrefetch() {
+                clearTimeout(this.prefetchTimer);
+            },
+
+            async fetchIntoCache(route) {
+                if (route === this.currentRoute || this.prefetchCache[route]) return;
+
+                try {
+                    const response = await fetch('/api/method/wiki.frappe_wiki.doctype.wiki_document.wiki_document.get_page_data', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Frappe-CSRF-Token': window.CSRF_TOKEN
+                        },
+                        body: JSON.stringify({ route })
+                    });
+                    const data = await response.json();
+                    if (data.message) {
+                        this.prefetchCache[route] = data.message;
+                    }
+                } catch (e) {
+                    // Prefetch is only an optimization.
+                }
+            },
+
+            async navigateTo(route, pushState = true) {
+                if (route === this.currentRoute) return;
+
+                if (this.prefetchCache[route]) {
+                    this.showPage(route, this.prefetchCache[route], pushState);
+                    return;
+                }
+
+                this.loading = true;
+
+                try {
+                    const response = await fetch('/api/method/wiki.frappe_wiki.doctype.wiki_document.wiki_document.get_page_data', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Frappe-CSRF-Token': window.CSRF_TOKEN
+                        },
+                        body: JSON.stringify({ route })
+                    });
+                    const data = await response.json();
+
+                    if (data.message) {
+                        this.showPage(route, data.message, pushState);
+                    } else {
+                        throw new Error('Invalid response');
+                    }
+                } catch (error) {
+                    window.location.href = '/' + route;
+                } finally {
+                    this.loading = false;
+                }
+            },
+
+            showPage(route, data, pushState) {
+                const previousUrl = window.location.origin + '/' + this.currentRoute;
+                this.updateContent(data);
+                this.currentRoute = route;
+                if (pushState) {
+                    history.pushState({ route }, '', '/' + route);
+                }
+                // After the URL changes: the view log reads the page path from the Referer header.
+                window.wikiLogView?.(previousUrl);
+            },
+
+            updateContent(data) {
+                document.title = data.title;
+                const titleEl = document.getElementById('wiki-page-title');
+                if (titleEl) titleEl.textContent = data.title;
+
+                // Only the page's own tag: head HTML may carry a site-wide one.
+                let robotsEl = document.querySelector('meta[data-page-robots]');
+                if (data.disable_indexing && !robotsEl) {
+                    robotsEl = document.createElement('meta');
+                    robotsEl.name = 'robots';
+                    robotsEl.content = 'noindex';
+                    robotsEl.dataset.pageRobots = '';
+                    document.head.appendChild(robotsEl);
+                } else if (!data.disable_indexing) {
+                    robotsEl?.remove();
+                }
+
+                const contentEl = document.getElementById('wiki-content');
+                if (contentEl) contentEl.innerHTML = data.rendered_content;
+
+                this.updateNavButtons(data.prev_doc, data.next_doc);
+                this.updateFolderName(data.folder_name);
+
+                if (Alpine.store('pageContent')) {
+                    Alpine.store('pageContent').markdown = data.raw_markdown;
+                }
+
+                const editLinks = document.querySelectorAll('.wiki-edit-link');
+                if (editLinks) {
+                    editLinks.forEach(link => link.setAttribute('href', data.edit_link));
+                }
+
+                const lastUpdatedEl = document.getElementById('wiki-last-updated');
+                if (lastUpdatedEl) {
+                    lastUpdatedEl.textContent = {{ _("Last updated {0}") | tojson }}.replace('{0}', data.last_updated);
+                    if (data.last_updated_on) {
+                        lastUpdatedEl.setAttribute('title', data.last_updated_on);
+                        lastUpdatedEl.setAttribute('data-timestamp', data.last_updated_on);
+                    }
+                }
+
+                this.updateToc(data.toc_headings || []);
+                if (Alpine.store('toc')) {
+                    Alpine.store('toc').refresh();
+                }
+
+                if (Alpine.store('feedback')) {
+                    Alpine.store('feedback').refresh();
+                }
+
+                window.wikiEnhanceContent?.();
+
+                window.scrollTo(0, 0);
+            },
+
+            updateToc(headings) {
+                const tocContainer = document.getElementById('wiki-toc');
+                if (!tocContainer) return;
+
+                if (!headings || headings.length === 0) {
+                    tocContainer.innerHTML = '';
+                    return;
+                }
+
+                const escapeHtml = (str) => {
+                    const div = document.createElement('div');
+                    div.textContent = str;
+                    return div.innerHTML;
+                };
+
+                // Keep in sync with includes/toc.html.
+                let html = '<nav class="sticky top-[calc(var(--wiki-chrome-h)+24px)] max-h-[calc(100vh-var(--wiki-chrome-h)-4rem)] overflow-y-auto no-scrollbar flex flex-col leading-relaxed">';
+                html += '<span class="font-medium whitespace-nowrap pl-4 pb-1 border-l border-transparent">' + escapeHtml({{ _("On this page") | tojson }}) + '</span>';
+                const hasH2 = headings.some(heading => heading.level === 2);
+                headings.forEach(heading => {
+                    const safeId = escapeHtml(heading.id);
+                    const safeText = escapeHtml(heading.text);
+                    const indent = heading.level >= 3 && hasH2 ? 'pl-7' : 'pl-4';
+                    html += `<a href="#${safeId}" data-toc-link="${safeId}" class="toc-link ${indent} py-1 border-l border-[var(--outline-gray-1)] text-[var(--ink-gray-6)] hover:text-[var(--ink-gray-9)]">${safeText}</a>`;
+                });
+                html += '</nav>';
+                tocContainer.innerHTML = html;
+            },
+
+            updateFolderName(folderName) {
+                document.querySelectorAll('[data-wiki-folder-eyebrow]').forEach((el) => {
+                    el.textContent = folderName || '';
+                    el.hidden = !folderName;
+                });
+            },
+
+            updateNavButtons(prevDoc, nextDoc) {
+                const navContainer = document.getElementById('wiki-nav-buttons');
+                if (!navContainer) return;
+
+                let html = '';
+
+                if (prevDoc || nextDoc) {
+                    // Keep in sync with document.html. Route and title are editor-set, so escape every value (stored XSS).
+                    const esc = (str) => String(str ?? '')
+                        .replaceAll('&', '&amp;')
+                        .replaceAll('<', '&lt;')
+                        .replaceAll('>', '&gt;')
+                        .replaceAll('"', '&quot;')
+                        .replaceAll("'", '&#39;');
+                    const jsRoute = (route) => esc(JSON.stringify(route));
+                    const navLinkClasses = "group inline-flex min-w-0 max-w-[48%] items-center gap-2 h-8 px-2.5 rounded-4 text-base font-medium text-[var(--ink-gray-8)] bg-[var(--surface-gray-2)] hover:bg-[var(--surface-gray-3)] active:bg-[var(--surface-gray-4)] transition-colors no-underline";
+                    const arrowLeft = '<svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path></svg>';
+                    const arrowRight = '<svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>';
+                    html = '<div class="flex justify-between gap-5">';
+
+                    if (prevDoc) {
+                        html += `
+                            <a href="/${esc(prevDoc.route)}"
+                               @click.prevent="$store.navigation.navigateTo(${jsRoute(prevDoc.route)})"
+                               @mouseenter="$store.navigation.prefetch(${jsRoute(prevDoc.route)})"
+                               @mouseleave="$store.navigation.cancelPrefetch()"
+                               class="${navLinkClasses}">
+                                ${arrowLeft}
+                                <span class="truncate">${esc(prevDoc.title)}</span>
+                            </a>`;
+                    }
+
+                    if (nextDoc) {
+                        html += `
+                            <a href="/${esc(nextDoc.route)}"
+                               @click.prevent="$store.navigation.navigateTo(${jsRoute(nextDoc.route)})"
+                               @mouseenter="$store.navigation.prefetch(${jsRoute(nextDoc.route)})"
+                               @mouseleave="$store.navigation.cancelPrefetch()"
+                               class="${navLinkClasses}">
+                                <span class="truncate">${esc(nextDoc.title)}</span>
+                                ${arrowRight}
+                            </a>`;
+                    }
+
+                    html += '</div>';
+                }
+
+                navContainer.innerHTML = html;
+            }
+        });
+    });
+
+    function wikiSidebar() {
+        return {
+            get isCollapsed() {
+                return this.$store.sidebar.isCollapsed;
+            },
+
+            init() {
+                const tree = this.$refs.nav.querySelector('.wiki-tree');
+                if (!tree) return;
+
+                initWikiTree(tree);
+                revealWikiPage(tree, this.$store.navigation.currentRoute);
+                this.$watch('$store.navigation.currentRoute', (route) => revealWikiPage(tree, route));
+            },
+        }
+    }
+
+    // Alpine $persist's key from before the tree dropped Alpine, so saved state carries over.
+    const WIKI_TREE_EXPANDED_KEY = '_x_expandedStates';
+
+    function initWikiTree(tree) {
+        let expanded = {};
+        try {
+            expanded = JSON.parse(localStorage.getItem(WIKI_TREE_EXPANDED_KEY)) || {};
+        } catch (e) {}
+        tree.querySelectorAll('details[data-node-id]').forEach((group) => {
+            if (expanded[group.dataset.nodeId]) group.open = true;
+        });
+
+        // `toggle` does not bubble, so listen in the capture phase.
+        tree.addEventListener('toggle', (event) => {
+            expanded[event.target.dataset.nodeId] = event.target.open;
+            try {
+                localStorage.setItem(WIKI_TREE_EXPANDED_KEY, JSON.stringify(expanded));
+            } catch (e) {}
+        }, true);
+
+        const pageLink = (event) => event.target.closest('a.wiki-link:not(.wiki-external-link)');
+        const routeOf = (link) => link.getAttribute('href').slice(1);
+
+        tree.addEventListener('click', (event) => {
+            const link = pageLink(event);
+            if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            Alpine.store('navigation').navigateTo(routeOf(link));
+        });
+        tree.addEventListener('mouseover', (event) => {
+            const link = pageLink(event);
+            if (link && !link.contains(event.relatedTarget)) Alpine.store('navigation').prefetch(routeOf(link));
+        });
+        tree.addEventListener('mouseout', (event) => {
+            const link = pageLink(event);
+            if (link && !link.contains(event.relatedTarget)) Alpine.store('navigation').cancelPrefetch();
+        });
+    }
+
+    function revealWikiPage(tree, route) {
+        tree.querySelector('[aria-current]')?.removeAttribute('aria-current');
+        const link = Array.from(tree.querySelectorAll('a.wiki-link'))
+            .find((candidate) => candidate.getAttribute('href') === '/' + route);
+        if (!link) return;
+
+        link.setAttribute('aria-current', 'page');
+        const closedGroups = [];
+        for (let group = link.closest('details'); group; group = group.parentElement.closest('details')) {
+            if (!group.open) closedGroups.push(group);
+        }
+        closedGroups.forEach((group) => { group.open = true; });
+
+        const scrollToLink = () => link.scrollIntoView({ block: 'nearest' });
+        if (closedGroups.length) setTimeout(scrollToLink, 250);
+        else scrollToLink();
+    }
+</script>

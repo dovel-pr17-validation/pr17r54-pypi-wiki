@@ -1,0 +1,20 @@
+{% macro render_wiki_tree(nodes, current_route='', expanded_nodes=set(), list_class='wiki-tree') -%}
+    {%- if nodes -%}
+        <ul class="{{ list_class }}">
+            {%- for node in nodes -%}
+                <li class="wiki-item">
+                    {%- if node.is_group -%}
+                        <details data-node-id="{{ node.name }}"{% if node.name in expanded_nodes %} open{% endif %}>
+                            <summary class="wiki-row" title="{{ node.title | e }}">{{ node.title | e }}</summary>
+                            {{- render_wiki_tree(node.children, current_route, expanded_nodes, 'wiki-children') -}}
+                        </details>
+                    {%- elif node.is_external_link -%}
+                        <a class="wiki-row wiki-link wiki-external-link" href="{{ node.external_url | e }}" target="_blank" rel="noopener noreferrer" title="{{ node.title | e }}"><span>{{ node.title | e }}</span></a>
+                    {%- else -%}
+                        <a class="wiki-row wiki-link" href="/{{ node.route | e }}" title="{{ node.title | e }}"{% if node.route == current_route %} aria-current="page"{% endif %}>{{ node.title | e }}</a>
+                    {%- endif -%}
+                </li>
+            {%- endfor -%}
+        </ul>
+    {%- endif -%}
+{%- endmacro %}
